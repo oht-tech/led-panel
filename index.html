@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LED Panel Kontrol</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 440px; margin: 0 auto; padding: 20px 16px 40px;
+    background: #f5f5f7; color: #1d1d1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1c1e; color: #f5f5f7; }
+    .card { background: #2c2c2e !important; }
+    input[type=text], input[type=password] { background: #3a3a3c; color: #f5f5f7; border-color: #48484a; }
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { font-size: 13px; opacity: .6; margin: 0 0 20px; }
+  .card {
+    background: #fff; border-radius: 14px; padding: 16px; margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  .row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .name { font-weight: 600; font-size: 15px; }
+  .pct { font-variant-numeric: tabular-nums; opacity: .7; font-size: 14px; }
+  input[type=range] { width: 100%; margin: 0 0 18px; }
+  input[type=range]:last-of-type { margin-bottom: 0; }
+  label { display: block; font-size: 12px; opacity: .7; margin-bottom: 4px; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 9px 11px; border: 1px solid #d2d2d7; border-radius: 8px;
+    font-size: 14px; margin-bottom: 10px;
+  }
+  button {
+    width: 100%; padding: 13px; font-size: 16px; font-weight: 600;
+    border: none; border-radius: 10px; background: #0071e3; color: #fff; cursor: pointer;
+  }
+  button:disabled { background: #999; cursor: not-allowed; }
+  button.secondary { background: #6e6e73; margin-top: 8px; }
+  .status { font-size: 13px; padding: 10px 12px; border-radius: 8px; margin-top: 12px; }
+  .status.ok { background: #e3f5e8; color: #1d6b33; }
+  .status.err { background: #fdeaea; color: #9b1c1c; }
+  .status.wait { background: #eef2f7; color: #4a5568; }
+  @media (prefers-color-scheme: dark) {
+    .status.ok { background: #14371f; color: #86e29b; }
+    .status.err { background: #3d1717; color: #f19a9a; }
+    .status.wait { background: #2a2f37; color: #b8c2cf; }
+  }
+  .presets { display: flex; gap: 8px; margin-top: 10px; }
+  .presets button { flex: 1; padding: 9px; font-size: 13px; background: #e8e8ed; color: #1d1d1f; }
+  @media (prefers-color-scheme: dark) { .presets button { background: #3a3a3c; color: #f5f5f7; } }
+</style>
+</head>
+<body>
+
+<h1>LED Panel Kontrol</h1>
+<p class="sub">Uzaktan kontrol · MQTT</p>
+
+<div class="card" id="connCard">
+  <label>Kullanıcı adı</label>
+  <input type="text" id="user" placeholder="HiveMQ kullanıcı adı" autocomplete="username">
+  <label>Şifre</label>
+  <input type="password" id="pass" placeholder="HiveMQ şifresi" autocomplete="current-password">
+  <button id="connectBtn" onclick="connect()">Bağlan</button>
+  <div id="connStatus" class="status wait">Bağlı değil</div>
+</div>
+
+<div class="card" id="controlCard" style="display:none">
+  <div class="row"><span class="name">FR · Far Red</span><span class="pct" id="frPct">0%</span></div>
+  <input type="range" id="fr" min="0" max="100" value="0" oninput="upd('fr')">
+
+  <div class="row"><span class="name">TG · Turkuaz/Yeşil</span><span class="pct" id="tgPct">0%</span></div>
+  <input type="range" id="tg" min="0" max="100" value="0" oninput="upd('tg')">
+
+  <div class="row"><span class="name">UV</span><span class="pct" id="uvPct">0%</span></div>
+  <input type="range" id="uv" min="0" max="100" value="0" oninput="upd('uv')">
+
+  <div class="row"><span class="name">DB · Deep Blue</span><span class="pct" id="dbPct">0%</span></div>
+  <input type="range" id="db" min="0" max="100" value="0" oninput="upd('db')">
+
+  <div class="row"><span class="name">HR · Hyper Red</span><span class="pct" id="hrPct">0%</span></div>
+  <input type="range" id="hr" min="0" max="100" value="0" oninput="upd('hr')">
+
+  <button id="sendBtn" onclick="send()">Gönder</button>
+
+  <div class="presets">
+    <button onclick="preset(0)">Hepsi %0</button>
+    <button onclick="preset(25)">%25</button>
+    <button onclick="preset(50)">%50</button>
+    <button onclick="preset(100)">%100</button>
+  </div>
+
+  <div id="msgStatus" class="status wait">Komut bekleniyor</div>
+</div>
+
+<script>
+const HOST  = "fa4d456f37bd4f6bbae5b005d8092333.s1.eu.hivemq.cloud";
+const PORT  = 8884;                       // WebSocket over TLS
+const TOPIC_CMD    = "panel/1/command";
+const TOPIC_STATUS = "panel/1/status";
+
+const CH = ["fr","tg","uv","db","hr"];
+let client = null;
+
+function upd(id) {
+  document.getElementById(id + "Pct").textContent = document.getElementById(id).value + "%";
+}
+
+function preset(v) {
+  CH.forEach(c => { document.getElementById(c).value = v; upd(c); });
+  send();
+}
+
+function setStatus(elId, text, cls) {
+  const el = document.getElementById(elId);
+  el.textContent = text;
+  el.className = "status " + cls;
+}
+
+function connect() {
+  const user = document.getElementById("user").value.trim();
+  const pass = document.getElementById("pass").value;
+  if (!user || !pass) { setStatus("connStatus", "Kullanıcı adı ve şifre gerekli", "err"); return; }
+
+  localStorage.setItem("panelUser", user);
+  setStatus("connStatus", "Bağlanıyor…", "wait");
+  document.getElementById("connectBtn").disabled = true;
+
+  client = mqtt.connect(`wss://${HOST}:${PORT}/mqtt`, {
+    username: user,
+    password: pass,
+    clean: true,
+    reconnectPeriod: 4000,
+    connectTimeout: 10000,
+    clientId: "web-" + Math.random().toString(16).slice(2, 10)
+  });
+
+  client.on("connect", () => {
+    setStatus("connStatus", "Bağlandı", "ok");
+    document.getElementById("controlCard").style.display = "block";
+    document.getElementById("connectBtn").textContent = "Bağlı";
+    client.subscribe(TOPIC_STATUS);
+  });
+
+  client.on("message", (topic, payload) => {
+    const txt = payload.toString();
+    setStatus("msgStatus", txt, txt.startsWith("HATA") ? "err" : "ok");
+  });
+
+  client.on("error", (err) => {
+    setStatus("connStatus", "Hata: " + err.message, "err");
+    document.getElementById("connectBtn").disabled = false;
+  });
+
+  client.on("close", () => {
+    setStatus("connStatus", "Bağlantı kapandı", "err");
+    document.getElementById("connectBtn").disabled = false;
+    document.getElementById("connectBtn").textContent = "Bağlan";
+  });
+}
+
+function send() {
+  if (!client || !client.connected) {
+    setStatus("msgStatus", "Önce bağlanın", "err");
+    return;
+  }
+  const vals = CH.map(c => document.getElementById(c).value);
+  const payload = vals.join(",");
+  client.publish(TOPIC_CMD, payload);
+  setStatus("msgStatus", "Gönderildi: " + payload + " · yanıt bekleniyor…", "wait");
+}
+
+// kullanıcı adını hatırla
+window.addEventListener("load", () => {
+  const saved = localStorage.getItem("panelUser");
+  if (saved) document.getElementById("user").value = saved;
+});
+</script>
+
+</body>
+</html>
